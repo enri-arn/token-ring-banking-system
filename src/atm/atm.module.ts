@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { HttpModule } from '@nestjs/axios';
 import { ATMService } from './atm.service';
 import { ATMController } from './atm.controller';
 import { BankingModule } from '../banking/banking.module';
@@ -9,6 +10,7 @@ import { TokenModule } from '../token/token.module';
  * This module brings together:
  * - Banking operations (BankingModule)
  * - Token Ring mutual exclusion (TokenModule)
+ * - HTTP communication for token passing (HttpModule)
  * - Node coordination and communication (ATMService, ATMController)
  *
  * @remarks
@@ -16,7 +18,7 @@ import { TokenModule } from '../token/token.module';
  * in the distributed Token Ring system.
  */
 @Module({
-  imports: [BankingModule, TokenModule],
+  imports: [BankingModule, TokenModule, HttpModule],
   controllers: [ATMController],
   providers: [ATMService],
   exports: [ATMService],

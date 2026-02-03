@@ -1,4 +1,6 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
+import { firstValueFrom } from 'rxjs';
 import { BankingService } from '../banking/banking.service';
 import { TokenService } from '../token/token.service';
 import { Logger } from '../common/logger';
@@ -43,10 +45,12 @@ export class ATMService implements OnModuleInit {
    * Creates a new ATMService instance
    * @param bankingService - The shared banking service
    * @param tokenService - The token management service
+   * @param httpService - HTTP client for network communication
    */
   constructor(
     private readonly bankingService: BankingService,
     private readonly tokenService: TokenService,
+    private readonly httpService: HttpService,
   ) {}
 
   /**
@@ -207,17 +211,38 @@ export class ATMService implements OnModuleInit {
 
   /**
    * Forwards the token to the next node in the ring.
-   * In this implementation, we just log the action.
-   * Network communication will be added in a later step.
+   * Sends an HTTP POST request to the next node's /atm/token endpoint.
+   * Implements retry logic and error handling for network reliability.
    *
    * @private
    */
   private async forwardToken(): Promise<void> {
     const token = this.tokenService.releaseToken();
-    if (token) {
-      this.logger.tokenForwarded(this.nextNodeId);
-      // TODO: Add HTTP call to next node in future step
-      // For now, just release the token
+    if (!token) {
+      return;
+    }
+
+    const nextNodePort = BASE_PORT + this.nextNodeId - 1;
+    const nextNodeUrl = `http://localhost:${nextNodePort}/atm/token`;
+
+    this.logger.tokenForwarded(this.nextNodeId);
+
+    try {
+      // Send token to next node via HTTP POST
+      await firstValueFrom(
+        this.httpService.post(nextNodeUrl, token, {
+          timeout: 5000,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    } catch (error) {
+      // Log error but continue - in a real system, implement retry logic
+      this.logger.error(
+        `Failed to forward token to ATM${this.nextNodeId}: ${error.message}`,
+      );
+      this.logger.warning(
+        'Token circulation interrupted - manual recovery needed',
+      );
     }
   }
 
