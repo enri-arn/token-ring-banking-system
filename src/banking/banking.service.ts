@@ -1,133 +1,70 @@
 import { Injectable } from '@nestjs/common';
-import { BankAccount, Transaction } from '../common/types';
-import { INITIAL_BALANCE } from '../common/constants';
 
 /**
- * BankingService manages the shared bank account and all banking operations.
- * This service represents the critical section resource that must be accessed
- * with mutual exclusion using the Token Ring algorithm.
+ * BankingService manages banking operations without maintaining state.
+ * In the Token Ring system, the balance is carried in the token itself,
+ * ensuring no shared memory between distributed nodes.
  *
- * The service maintains:
- * - Current account balance
+ * The service provides:
  * - Transaction validation logic
- * - Atomic deposit and withdrawal operations
+ * - Pure functions for deposit and withdrawal calculations
  *
  * @remarks
- * In a distributed system, this service's methods should only be called
- * by the ATM node currently holding the token to ensure mutual exclusion.
+ * This service does NOT store the balance internally. The balance
+ * travels with the token, respecting the "no shared memory" constraint
+ * of the distributed system.
  *
  * @example
  * const bankingService = new BankingService();
- * const result = await bankingService.deposit(100, 1);
- * console.log(`New balance: ${result.balance}`);
+ * const newBalance = bankingService.deposit(currentBalance, 100, 1);
  */
 @Injectable()
 export class BankingService {
   /**
-   * The shared bank account state
-   * This is the critical resource protected by mutual exclusion
-   */
-  private account: BankAccount;
-
-  /**
-   * Initializes the banking service with the default account balance
-   */
-  constructor() {
-    this.account = {
-      balance: INITIAL_BALANCE,
-      lastUpdated: new Date(),
-    };
-  }
-
-  /**
-   * Retrieves the current bank account state
-   * @returns A copy of the current account state
+   * Executes a deposit transaction.
+   * This is a pure function that calculates the new balance without side effects.
    *
-   * @example
-   * const account = bankingService.getAccount();
-   * console.log(`Current balance: ${account.balance}`);
-   */
-  getAccount(): BankAccount {
-    return { ...this.account };
-  }
-
-  /**
-   * Retrieves the current account balance
-   * @returns The current balance as a number
-   */
-  getBalance(): number {
-    return this.account.balance;
-  }
-
-  /**
-   * Executes a deposit transaction, adding money to the account.
-   * This operation constitutes a critical section and should only be
-   * called by the token holder.
-   *
+   * @param currentBalance - The current balance from the token
    * @param amount - The amount to deposit (must be positive)
-   * @param atmId - The ID of the ATM executing the transaction
-   * @returns A Transaction object containing the transaction details and new balance
+   * @returns The new balance after deposit
    * @throws {Error} If the amount is not positive
    *
    * @example
-   * const transaction = await bankingService.deposit(100, 1);
-   * console.log(`Deposited ${transaction.amount}, new balance: ${account.balance}`);
+   * const newBalance = bankingService.deposit(1000, 100);
+   * // Returns: 1100
    */
-  async deposit(amount: number, atmId: number): Promise<Transaction> {
+  deposit(currentBalance: number, amount: number): number {
     // Validation
     if (amount <= 0) {
       throw new Error('Deposit amount must be positive');
     }
 
-    // Read current balance
-    const currentBalance = this.account.balance;
-
-    // Update balance
-    const newBalance = currentBalance + amount;
-    this.account.balance = newBalance;
-    this.account.lastUpdated = new Date();
-
-    // Create transaction record
-    const transaction: Transaction = {
-      type: 'deposit',
-      amount,
-      timestamp: new Date(),
-      atmId,
-    };
-
-    return transaction;
+    // Calculate new balance
+    return currentBalance + amount;
   }
 
   /**
-   * Executes a withdrawal transaction, removing money from the account.
-   * This operation constitutes a critical section and should only be
-   * called by the token holder.
+   * Executes a withdrawal transaction.
+   * This is a pure function that calculates the new balance without side effects.
    *
    * The transaction will fail if:
    * - The amount is not positive
    * - There are insufficient funds in the account
    *
+   * @param currentBalance - The current balance from the token
    * @param amount - The amount to withdraw (must be positive)
-   * @param atmId - The ID of the ATM executing the transaction
-   * @returns A Transaction object containing the transaction details and new balance
+   * @returns The new balance after withdrawal
    * @throws {Error} If the amount is not positive or if there are insufficient funds
    *
    * @example
-   * try {
-   *   const transaction = await bankingService.withdraw(200, 2);
-   *   console.log(`Withdrew ${transaction.amount}, new balance: ${account.balance}`);
-   * } catch (error) {
-   *   console.error('Withdrawal failed:', error.message);
-   * }
+   * const newBalance = bankingService.withdraw(1000, 200);
+   * // Returns: 800
    */
-  async withdraw(amount: number, atmId: number): Promise<Transaction> {
+  withdraw(currentBalance: number, amount: number): number {
     // Validation
     if (amount <= 0) {
       throw new Error('Withdrawal amount must be positive');
     }
-
-    // Read current balance
-    const currentBalance = this.account.balance;
 
     // Check sufficient funds
     if (currentBalance < amount) {
@@ -136,30 +73,7 @@ export class BankingService {
       );
     }
 
-    // Update balance
-    const newBalance = currentBalance - amount;
-    this.account.balance = newBalance;
-    this.account.lastUpdated = new Date();
-
-    // Create transaction record
-    const transaction: Transaction = {
-      type: 'withdrawal',
-      amount,
-      timestamp: new Date(),
-      atmId,
-    };
-
-    return transaction;
-  }
-
-  /**
-   * Resets the account to its initial state.
-   * Useful for testing and demonstration purposes.
-   */
-  reset(): void {
-    this.account = {
-      balance: INITIAL_BALANCE,
-      lastUpdated: new Date(),
-    };
+    // Calculate new balance
+    return currentBalance - amount;
   }
 }

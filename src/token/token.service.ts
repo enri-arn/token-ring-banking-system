@@ -63,20 +63,22 @@ export class TokenService {
   }
 
   /**
-   * Creates a new token with a unique identifier.
+   * Creates a new token with a unique identifier and initial balance.
    * This should only be called once at system initialization by one node.
    *
    * @param initialHolderId - The ID of the node that will initially hold the token
+   * @param initialBalance - The initial bank account balance
    * @returns A new Token object
    *
    * @example
-   * // ATM1 creates the token at startup
-   * const token = tokenService.createToken(1);
+   * // ATM1 creates the token at startup with $1000 initial balance
+   * const token = tokenService.createToken(1, 1000);
    */
-  createToken(initialHolderId: number): Token {
+  createToken(initialHolderId: number, initialBalance: number): Token {
     return {
       id: uuidv4(),
       holderId: initialHolderId,
+      balance: initialBalance,
     };
   }
 
@@ -110,6 +112,31 @@ export class TokenService {
    */
   getToken(): Token | null {
     return this.currentToken ? { ...this.currentToken } : null;
+  }
+
+  /**
+   * Updates the balance in the currently held token.
+   * This is used after executing a transaction to update the shared balance.
+   *
+   * @param newBalance - The new balance to set in the token
+   * @throws {Error} If the node doesn't currently hold the token
+   *
+   * @example
+   * tokenService.updateBalance(1200);
+   */
+  updateBalance(newBalance: number): void {
+    if (!this.currentToken) {
+      throw new Error('Cannot update balance: node does not hold the token');
+    }
+    this.currentToken.balance = newBalance;
+  }
+
+  /**
+   * Gets the current balance from the token
+   * @returns The balance or null if not holding the token
+   */
+  getBalance(): number | null {
+    return this.currentToken ? this.currentToken.balance : null;
   }
 
   /**

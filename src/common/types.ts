@@ -20,6 +20,8 @@ export interface Token {
   id: string;
   /** ID of the node currently holding the token */
   holderId: number;
+  /** Current shared bank account balance carried with the token */
+  balance: number;
 }
 
 /**

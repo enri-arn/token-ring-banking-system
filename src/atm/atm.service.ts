@@ -5,7 +5,11 @@ import { BankingService } from '../banking/banking.service';
 import { TokenService } from '../token/token.service';
 import { Logger } from '../common/logger';
 import { Token } from '../common/types';
-import { BASE_PORT, NUMBER_OF_NODES } from '../common/constants';
+import {
+  BASE_PORT,
+  NUMBER_OF_NODES,
+  INITIAL_BALANCE,
+} from '../common/constants';
 
 /**
  * ATMService represents a single ATM node in the Token Ring system.
@@ -129,9 +133,9 @@ export class ATMService implements OnModuleInit {
    * }
    */
   createInitialToken(): Token {
-    const token = this.tokenService.createToken(this.nodeId);
+    const token = this.tokenService.createToken(this.nodeId, INITIAL_BALANCE);
     this.tokenService.receiveToken(token);
-    this.logger.info('Initial token created');
+    this.logger.info(`Initial token created with balance: $${INITIAL_BALANCE}`);
     return token;
   }
 
@@ -186,16 +190,33 @@ export class ATMService implements OnModuleInit {
       return;
     }
 
+    // Get current balance from token
+    const currentBalance = this.tokenService.getBalance();
+    if (currentBalance === null) {
+      this.logger.error('Cannot execute transaction: no token held');
+      return;
+    }
+
     this.logger.transactionStarted(transaction.type, transaction.amount);
 
     try {
+      let newBalance: number;
+
       if (transaction.type === 'deposit') {
-        await this.bankingService.deposit(transaction.amount, this.nodeId);
+        newBalance = this.bankingService.deposit(
+          currentBalance,
+          transaction.amount,
+        );
       } else {
-        await this.bankingService.withdraw(transaction.amount, this.nodeId);
+        newBalance = this.bankingService.withdraw(
+          currentBalance,
+          transaction.amount,
+        );
       }
 
-      const newBalance = this.bankingService.getBalance();
+      // Update balance in token
+      this.tokenService.updateBalance(newBalance);
+
       this.logger.transactionCompleted(
         transaction.type,
         transaction.amount,
@@ -268,11 +289,12 @@ export class ATMService implements OnModuleInit {
   }
 
   /**
-   * Gets the current account balance
+   * Gets the current account balance from the token.
+   * Returns 0 if this node doesn't currently hold the token.
    * @returns The current balance
    */
   getBalance(): number {
-    return this.bankingService.getBalance();
+    return this.tokenService.getBalance() ?? 0;
   }
 
   /**
