@@ -50,10 +50,20 @@ export class ATMService implements OnModuleInit {
   ) {}
 
   /**
-   * Lifecycle hook called after module initialization
+   * Lifecycle hook called after module initialization.
+   * Reads NODE_ID from environment variable and initializes the ATM node.
+   * If NODE_ID is not set, defaults to 1.
+   * If this is node 1, creates and starts the initial token.
    */
   async onModuleInit() {
-    // Initialization will be done when the node starts with a specific ID
+    const nodeId = parseInt(process.env.NODE_ID || '1', 10);
+    await this.initialize(nodeId);
+
+    // Only node 1 creates the initial token
+    if (nodeId === 1) {
+      this.createInitialToken();
+      this.logger.info('Token Ring initialized. Token circulation started.');
+    }
   }
 
   /**
