@@ -20,18 +20,26 @@ export class ATMController {
   /**
    * Endpoint to receive the token from the previous node in the ring.
    * This is called by the predecessor when forwarding the token.
+   * 
+   * IMPORTANT: Returns immediately (200 OK) then processes token asynchronously.
+   * This prevents the sender from timing out while waiting for response.
    *
    * @param token - The token being passed to this node
-   * @returns Acknowledgment of token receipt
+   * @returns Immediate acknowledgment of token receipt
    *
    * @example
    * POST /atm/token
-   * Body: { "id": "uuid", "holderId": 1 }
+   * Body: { "id": "uuid", "holderId": 1, "balance": 1000 }
    */
   @Post('token')
   @HttpCode(200)
   async receiveToken(@Body() token: Token): Promise<{ message: string }> {
-    await this.atmService.receiveToken(token);
+    // Process token asynchronously (don't await - return immediately)
+    this.atmService.receiveToken(token).catch((error) => {
+      console.error(`[ATMController] Error processing token: ${error.message}`);
+    });
+    
+    // Return immediately so sender doesn't timeout
     return { message: 'Token received' };
   }
 
@@ -79,6 +87,23 @@ export class ATMController {
       hasToken: this.atmService.hasToken(),
       pendingTransactions: this.atmService.getPendingTransactionCount(),
       balance: this.atmService.getBalance(),
+    };
+  }
+
+  /**
+   * Health check endpoint to verify if the node is ready to participate in the Token Ring.
+   * This is used by other nodes to ensure this node is fully initialized before starting token circulation.
+   *
+   * @returns Health status
+   *
+   * @example
+   * GET /atm/health
+   */
+  @Get('health')
+  healthCheck(): { status: string; nodeId: number } {
+    return {
+      status: 'ok',
+      nodeId: this.atmService.getNodeId(),
     };
   }
 }

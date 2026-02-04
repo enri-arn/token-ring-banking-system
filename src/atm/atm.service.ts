@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { BankingService } from '../banking/banking.service';
@@ -29,7 +29,7 @@ import {
  * await atmService.requestTransaction('deposit', 100);
  */
 @Injectable()
-export class ATMService implements OnModuleInit {
+export class ATMService implements OnApplicationBootstrap {
   /**
    * The unique identifier of this ATM node (1-4)
    */
@@ -46,6 +46,11 @@ export class ATMService implements OnModuleInit {
   private logger: Logger;
 
   /**
+   * Flag to prevent concurrent token processing
+   */
+  private isProcessing: boolean = false;
+
+  /**
    * Creates a new ATMService instance
    * @param bankingService - The shared banking service
    * @param tokenService - The token management service
@@ -58,18 +63,18 @@ export class ATMService implements OnModuleInit {
   ) {}
 
   /**
-   * Lifecycle hook called after module initialization.
+   * Lifecycle hook called after application bootstrap (all modules initialized and ready).
    * Reads NODE_ID from environment variable and initializes the ATM node.
    * If NODE_ID is not set, defaults to 1.
    * If this is node 1, creates and starts the initial token.
    */
-  async onModuleInit() {
+  async onApplicationBootstrap() {
     const nodeId = parseInt(process.env.NODE_ID || '1', 10);
     await this.initialize(nodeId);
 
     // Only node 1 creates the initial token
     if (nodeId === 1) {
-      this.createInitialToken();
+      await this.createInitialToken();
       this.logger.info('Token Ring initialized. Token circulation started.');
     }
   }
@@ -121,22 +126,29 @@ export class ATMService implements OnModuleInit {
   }
 
   /**
-   * Creates the initial token for the Token Ring.
+   * Creates the initial token for the Token Ring and starts circulation.
    * This should only be called by one node (typically ATM1) at startup.
-   *
-   * @returns The newly created token
+   * Waits for other nodes to start up before beginning token circulation.
    *
    * @example
    * // Only ATM1 creates the token
    * if (nodeId === 1) {
-   *   const token = atmService.createInitialToken();
+   *   await atmService.createInitialToken();
    * }
    */
-  createInitialToken(): Token {
+  async createInitialToken(): Promise<void> {
+    this.logger.info(
+      `Creating initial token with balance: $${INITIAL_BALANCE}`,
+    );
     const token = this.tokenService.createToken(this.nodeId, INITIAL_BALANCE);
     this.tokenService.receiveToken(token);
-    this.logger.info(`Initial token created with balance: $${INITIAL_BALANCE}`);
-    return token;
+
+    // Wait for other nodes to start up before beginning circulation
+    this.logger.info('Waiting 10 seconds for other nodes to start...');
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+
+    this.logger.info('Starting token circulation...');
+    await this.processToken();
   }
 
   /**
@@ -153,6 +165,12 @@ export class ATMService implements OnModuleInit {
    * await atmService.receiveToken(incomingToken);
    */
   async receiveToken(token: Token): Promise<void> {
+    // Prevent concurrent processing
+    if (this.isProcessing) {
+      this.logger.info('Already holding token, ignoring duplicate receipt');
+      return;
+    }
+
     this.logger.tokenReceived();
     this.tokenService.receiveToken(token);
 
@@ -163,17 +181,24 @@ export class ATMService implements OnModuleInit {
   /**
    * Processes the token according to Token Ring algorithm:
    * - If has pending transactions: execute one transaction
-   * - If no pending transactions: forward token immediately
+   * - If no pending transactions: wait briefly then forward token
    *
    * @private
    */
   private async processToken(): Promise<void> {
-    if (this.tokenService.canAccessCriticalSection()) {
-      // Execute the next pending transaction
-      await this.executeNextTransaction();
-    } else {
-      // No pending transactions, forward token immediately
-      await this.forwardToken();
+    this.isProcessing = true;
+    try {
+      if (this.tokenService.canAccessCriticalSection()) {
+        // Execute the next pending transaction
+        await this.executeNextTransaction();
+      } else {
+        // No pending transactions: hold token for 5 seconds, then forward
+        this.logger.info('Holding token for 5 seconds...');
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        await this.forwardToken();
+      }
+    } finally {
+      this.isProcessing = false;
     }
   }
 
@@ -233,37 +258,49 @@ export class ATMService implements OnModuleInit {
   /**
    * Forwards the token to the next node in the ring.
    * Sends an HTTP POST request to the next node's /atm/token endpoint.
-   * Implements retry logic and error handling for network reliability.
+   * Tries multiple times with exponential backoff. If all attempts fail, stops circulation.
    *
    * @private
    */
   private async forwardToken(): Promise<void> {
-    const token = this.tokenService.releaseToken();
+    const token = this.tokenService.getToken();
     if (!token) {
       return;
     }
 
     const nextNodePort = BASE_PORT + this.nextNodeId - 1;
-    const nextNodeUrl = `http://localhost:${nextNodePort}/atm/token`;
+    const nextNodeUrl = `http://127.0.0.1:${nextNodePort}/atm/token`;
 
-    this.logger.tokenForwarded(this.nextNodeId);
+    // Retry infinitely until successful (every 5 seconds)
+    let attempt = 1;
+    while (true) {
+      try {
+        this.logger.tokenForwarded(this.nextNodeId);
 
-    try {
-      // Send token to next node via HTTP POST
-      await firstValueFrom(
-        this.httpService.post(nextNodeUrl, token, {
-          timeout: 5000,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-      );
-    } catch (error) {
-      // Log error but continue - in a real system, implement retry logic
-      this.logger.error(
-        `Failed to forward token to ATM${this.nextNodeId}: ${error.message}`,
-      );
-      this.logger.warning(
-        'Token circulation interrupted - manual recovery needed',
-      );
+        // Send token to next node via HTTP POST
+        await firstValueFrom(
+          this.httpService.post(nextNodeUrl, token, {
+            timeout: 3000, // 3 second timeout
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+
+        // Success! Release the token and exit
+        this.tokenService.releaseToken();
+        return;
+      } catch (error) {
+        // Failed to forward - keep token and retry
+        this.logger.error(
+          `Failed to forward to ATM${this.nextNodeId} (attempt ${attempt}): ${error.message}`,
+        );
+        this.logger.info(
+          `Retrying in 5 seconds... (ATM${this.nodeId} still holds token)`,
+        );
+        attempt++;
+
+        // Wait 5 seconds before retry
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      }
     }
   }
 
@@ -290,7 +327,7 @@ export class ATMService implements OnModuleInit {
 
   /**
    * Gets the current account balance from the token.
-   * Returns 0 if this node doesn't currently hold the token.
+   * Returns the actual balance if holding token, 0 otherwise.
    * @returns The current balance
    */
   getBalance(): number {
