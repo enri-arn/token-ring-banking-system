@@ -9,12 +9,18 @@ This system demonstrates distributed mutual exclusion through a Token Ring archi
 ### Key Features
 
 - **Token Ring Algorithm**: Only the node holding the token can execute transactions
+- **Bully Algorithm**: Distributed coordinator election for fault recovery
 - **Distributed Architecture**: 4 independent nodes running on localhost (ports 3001-3004)
 - **Safe Transactions**: Atomic deposit and withdrawal operations with mutual exclusion
 - **Message-based Coordination**: No shared memory, all communication via HTTP message passing
 - **Transaction Queueing**: Each node can queue multiple transactions, executed when token arrives
-- **Fault Tolerance**: Automatic retry mechanism if successor node is temporarily unavailable
-- **Complete Logging**: Full audit trail of token circulation and transaction execution
+- **Advanced Fault Tolerance**:
+  - Automatic retry for temporary failures
+  - Token regeneration when lost (Scenario A)
+  - Dynamic ring reconstruction without failed nodes (Scenario B)
+  - Coordinator election using Bully Algorithm
+  - Node recovery and reintegration
+- **Complete Logging**: Full audit trail of token circulation, elections, and transaction execution
 
 ## System Architecture
 
@@ -29,6 +35,25 @@ Each node:
 - Knows only its successor in the ring
 - Can perform deposits and withdrawals
 - Passes the token when not in use
+- Can participate in coordinator elections
+- Can become the coordinator if elected
+
+### Coordinator Role
+
+The system includes a **coordinator node** elected through the Bully Algorithm:
+
+- **Responsibilities**:
+  - Regenerate lost tokens (Scenario A)
+  - Reconstruct ring topology when nodes fail (Scenario B)
+  - Handle node recovery announcements
+  - Reintegrate recovered nodes into the ring
+
+- **Election**:
+  - Initially, the highest ID node (ATM4) is coordinator
+  - When coordinator fails, any node can trigger election
+  - Highest ID active node always becomes coordinator
+
+- **Not a central server**: The coordinator is just a regular node with additional responsibilities, maintaining the distributed nature of the system
 
 ## How It Works
 
@@ -63,19 +88,62 @@ The system implements a **distributed shared resource** (bank account balance) w
 - No global variables or shared memory between nodes
 - This respects the "no shared memory" constraint of distributed systems
 
-### Fault Tolerance
+### Fault Tolerance & Coordinator Election
 
-**Current Implementation:**
+The system implements comprehensive fault tolerance through the **Bully Algorithm** for coordinator election and automatic recovery mechanisms.
 
-The system handles **temporary node unavailability** through an automatic retry mechanism:
-- If a successor node is temporarily unreachable, the predecessor **keeps the token** and retries every 5 seconds
-- Token is **never lost** during forwarding failures
-- When the failed node recovers, circulation automatically resumes
+#### Bully Algorithm for Coordinator Election
 
-**Limitations:**
-- **No token recovery**: If a node crashes while holding the token, the system cannot recover automatically
-- **Manual intervention required**: In case of permanent node failure with token, manual restart is needed
-- This implementation focuses on the core Token Ring algorithm rather than advanced failure recovery mechanisms
+When a node detects coordinator failure, it initiates an election:
+
+1. **Election Process**:
+   - Node sends ELECTION messages to all nodes with higher IDs
+   - If a higher node responds with OK, it takes over the election
+   - If no OK response within timeout, the node declares itself coordinator
+   - New coordinator sends COORDINATOR announcement to all lower nodes
+
+2. **Initial State**:
+   - At startup, the highest ID node (ATM4) is assumed to be the initial coordinator
+   - If the coordinator fails, any node can start an election
+
+3. **Properties**:
+   - **Safety**: Only one coordinator at a time
+   - **Liveness**: System eventually elects a coordinator
+   - **Optimality**: The highest ID active node becomes coordinator
+
+#### Failure Scenarios and Recovery
+
+**Scenario A: Token Lost (Node with Token Crashes)**
+
+1. Nodes detect token circulation has stopped
+2. Election is triggered to select a coordinator
+3. New coordinator regenerates the token with last known balance
+4. Token circulation resumes through the ring
+
+**Scenario B: Node Failure Without Token**
+
+1. Node detects successor is unreachable (automatic retries fail)
+2. Election is triggered to select a coordinator
+3. Coordinator reconstructs ring topology without failed node
+4. New topology is broadcast to all active nodes
+5. Token circulation continues with updated ring structure
+
+**Scenario C: Node Recovery**
+
+1. Recovered node announces its return to the coordinator
+2. Coordinator verifies node health
+3. Coordinator reintegrates node into ring topology
+4. Updated topology is broadcast to all nodes
+5. Normal circulation resumes with recovered node included
+
+#### Fault Tolerance Features
+
+- **Automatic retry mechanism**: Handles temporary unavailability (5-second retries)
+- **Token regeneration**: Coordinator recreates lost tokens
+- **Dynamic topology**: Ring automatically adjusts to node failures/recoveries
+- **Coordinator election**: Bully Algorithm ensures a coordinator is always available
+- **Node health checks**: Coordinator validates recovered nodes before reintegration
+- **No single point of failure**: Any active node can become coordinator
 
 ## Description
 
@@ -194,21 +262,50 @@ Expected: Balance increases by $100 when ATM1 receives token
 ```
 Expected: ATM2 executes one transaction per token reception
 
-### 4. Node Failure Test
+### 4. Coordinator Election Test
+```powershell
+# Stop ATM4 (initial coordinator) manually (Ctrl+C in its terminal)
+# Watch other nodes' logs - should see election messages
+# Verify ATM3 becomes new coordinator
+```
+Expected: Bully Algorithm elects ATM3 as new coordinator
+
+### 5. Token Regeneration Test (Scenario A)
+```powershell
+# Identify which node has token (check logs)
+# Stop that node (Ctrl+C)
+# Wait for election and token regeneration
+# Verify token circulation resumes with new token
+```
+Expected: Coordinator regenerates token and circulation continues
+
+### 6. Ring Reconstruction Test (Scenario B)
 ```powershell
 # Stop ATM3 manually (Ctrl+C in its terminal)
-# Watch ATM2 logs - should show retry attempts
-# Restart ATM3
-# Circulation should resume automatically
+# Watch logs - should see ring reconstruction
+# Verify ATM2 now forwards to ATM4 (skipping ATM3)
 ```
+Expected: Coordinator reconstructs ring, circulation continues without failed node
+
+### 7. Node Recovery Test (Scenario C)
+```powershell
+# Stop ATM2 manually (Ctrl+C)
+# Wait for ring reconstruction
+# Restart ATM2
+# Watch logs for recovery announcements
+```
+Expected: ATM2 reintegrates into ring, topology updates, circulation includes ATM2 again
 
 ## Logging
 
 Each node produces structured logs:
 - **[INFO]** Token received/forwarded events
 - **[INFO]** Transaction execution start/completion
+- **[INFO]** Election messages (ELECTION, OK, COORDINATOR)
+- **[INFO]** Coordinator activities (token regeneration, ring reconstruction, topology broadcast)
+- **[INFO]** Node status changes (active, failed, recovered)
 - **[SUCCESS]** Successful transaction with balance update
-- **[ERROR]** Failed operations (insufficient funds, network errors)
+- **[ERROR]** Failed operations (insufficient funds, network errors, election failures)
 
 Example log:
 ```
@@ -216,6 +313,10 @@ Example log:
 [2026-02-04T19:39:59.435Z] [ATM1] [INFO] Transaction started: deposit $100
 [2026-02-04T19:39:59.436Z] [ATM1] [SUCCESS] Transaction completed: deposit $100 | New balance: $1100
 [2026-02-04T19:39:59.436Z] [ATM1] [INFO] Token forwarded to ATM2
+[2026-02-04T19:40:15.123Z] [ATM3] [INFO] Starting election (Bully Algorithm)
+[2026-02-04T19:40:15.456Z] [ATM4] [INFO] *** BECAME COORDINATOR ***
+[2026-02-04T19:40:20.789Z] [ATM4] [INFO] *** REGENERATING TOKEN *** (balance: $1100)
+[2026-02-04T19:40:21.012Z] [ATM4] [INFO] *** RECONSTRUCTING RING TOPOLOGY ***
 ```
 
 ## Implementation Details
@@ -228,11 +329,11 @@ Example log:
 
 ## Future Enhancements
 
-- [ ] **Token recovery mechanism**: Automatic detection and regeneration of lost tokens
-- [ ] **Leader election**: Distributed algorithm to handle permanent node failures
-- [ ] **Web interface**: Real-time monitoring dashboard for token circulation and transactions
-- [ ] **Transaction history**: Persistent storage and audit trail of all operations
+- [ ] **Web interface**: Real-time monitoring dashboard for token circulation, elections, and transactions
+- [ ] **Transaction history**: Persistent storage and audit trail of all operations in a database
 - [ ] **Advanced failure scenarios**: Testing and handling of Byzantine failures
+- [ ] **Performance monitoring**: Metrics collection for transaction throughput and election latency
+- [ ] **Multi-account support**: Handle multiple bank accounts with separate tokens
 
 ## License
 

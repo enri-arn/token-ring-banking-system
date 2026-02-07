@@ -44,6 +44,18 @@ export class TokenService {
   private nodeId: number;
 
   /**
+   * Flag indicating if this node is recovering from a failure.
+   * When recovering, the node must discard any old token it held.
+   */
+  private isRecovering: boolean = false;
+
+  /**
+   * ID of the valid token (set by coordinator after election).
+   * Used to prevent duplicate tokens in the system.
+   */
+  private validTokenId: string | null = null;
+
+  /**
    * Creates a new TokenService instance
    */
   constructor() {}
@@ -86,16 +98,42 @@ export class TokenService {
    * Receives the token from the previous node in the ring.
    * Updates the token's holder to this node.
    *
+   * IMPORTANT: If this node is recovering from failure, it must validate
+   * the token against the valid token ID from the coordinator.
+   *
    * @param token - The token received from the predecessor
+   * @returns true if token was accepted, false if rejected (duplicate/invalid)
    *
    * @example
-   * tokenService.receiveToken(incomingToken);
+   * const accepted = tokenService.receiveToken(incomingToken);
+   * if (!accepted) {
+   *   // Token was rejected, don't process it
+   * }
    */
-  receiveToken(token: Token): void {
+  receiveToken(token: Token): boolean {
+    // If we have a valid token ID set (by coordinator), validate incoming token
+    if (this.validTokenId !== null && token.id !== this.validTokenId) {
+      console.warn(
+        `[TokenService] Rejecting token ${token.id} - expected ${this.validTokenId}`,
+      );
+      return false;
+    }
+
+    // If recovering and we already have a token, discard the old one
+    if (this.isRecovering && this.currentToken !== null) {
+      console.log(
+        `[TokenService] Discarding old token ${this.currentToken.id} during recovery`,
+      );
+      this.currentToken = null;
+      this.isRecovering = false;
+    }
+
     this.currentToken = {
       ...token,
       holderId: this.nodeId,
     };
+
+    return true;
   }
 
   /**
@@ -255,5 +293,67 @@ export class TokenService {
    */
   getNodeId(): number {
     return this.nodeId;
+  }
+
+  /**
+   * Marks this node as recovering from failure.
+   * The node will discard any old token it held and wait for
+   * the coordinator to reintegrate it into the ring.
+   */
+  markAsRecovering(): void {
+    this.isRecovering = true;
+    console.log(
+      '[TokenService] Node marked as recovering - will discard old token',
+    );
+  }
+
+  /**
+   * Clears the recovering flag
+   */
+  clearRecoveringStatus(): void {
+    this.isRecovering = false;
+  }
+
+  /**
+   * Sets the valid token ID (called by coordinator after election)
+   * @param tokenId - The ID of the valid token
+   */
+  setValidTokenId(tokenId: string): void {
+    this.validTokenId = tokenId;
+    console.log(`[TokenService] Valid token ID set to: ${tokenId}`);
+  }
+
+  /**
+   * Gets the valid token ID
+   * @returns The valid token ID or null if not set
+   */
+  getValidTokenId(): string | null {
+    return this.validTokenId;
+  }
+
+  /**
+   * Clears the valid token ID
+   */
+  clearValidTokenId(): void {
+    this.validTokenId = null;
+  }
+
+  /**
+   * Discards the current token (used when recovering from failure)
+   * This prevents duplicate tokens in the system.
+   */
+  discardToken(): void {
+    if (this.currentToken) {
+      console.log(`[TokenService] Discarding token ${this.currentToken.id}`);
+      this.currentToken = null;
+    }
+  }
+
+  /**
+   * Checks if this node is currently recovering
+   * @returns true if recovering
+   */
+  isNodeRecovering(): boolean {
+    return this.isRecovering;
   }
 }

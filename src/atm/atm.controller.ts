@@ -1,6 +1,11 @@
 import { Controller, Post, Get, Body, HttpCode } from '@nestjs/common';
 import { ATMService } from './atm.service';
-import { Token } from '../common/types';
+import {
+  Token,
+  ElectionMessage,
+  RecoveryMessage,
+  TopologyMessage,
+} from '../common/types';
 
 /**
  * ATMController handles HTTP endpoints for Token Ring communication.
@@ -20,7 +25,7 @@ export class ATMController {
   /**
    * Endpoint to receive the token from the previous node in the ring.
    * This is called by the predecessor when forwarding the token.
-   * 
+   *
    * IMPORTANT: Returns immediately (200 OK) then processes token asynchronously.
    * This prevents the sender from timing out while waiting for response.
    *
@@ -38,7 +43,7 @@ export class ATMController {
     this.atmService.receiveToken(token).catch((error) => {
       console.error(`[ATMController] Error processing token: ${error.message}`);
     });
-    
+
     // Return immediately so sender doesn't timeout
     return { message: 'Token received' };
   }
@@ -104,6 +109,125 @@ export class ATMController {
     return {
       status: 'ok',
       nodeId: this.atmService.getNodeId(),
+    };
+  }
+
+  /**
+   * Endpoint to receive an ELECTION message (Bully Algorithm).
+   * When a node receives an ELECTION message from a lower ID node,
+   * it responds with OK and may start its own election.
+   *
+   * @param message - The election message
+   * @returns OK response if this node has higher ID
+   *
+   * @example
+   * POST /atm/election
+   * Body: { "type": "ELECTION", "senderId": 2, "timestamp": "..." }
+   */
+  @Post('election')
+  @HttpCode(200)
+  async receiveElection(
+    @Body() message: ElectionMessage,
+  ): Promise<{ ok: boolean }> {
+    const ok = await this.atmService.handleElectionMessage(message.senderId);
+    return { ok };
+  }
+
+  /**
+   * Endpoint to receive a COORDINATOR announcement (Bully Algorithm).
+   * This message announces the new coordinator after an election.
+   *
+   * @param message - The coordinator message
+   * @returns Acknowledgment
+   *
+   * @example
+   * POST /atm/coordinator
+   * Body: { "type": "COORDINATOR", "senderId": 4, "coordinatorId": 4, "timestamp": "..." }
+   */
+  @Post('coordinator')
+  @HttpCode(200)
+  receiveCoordinator(@Body() message: ElectionMessage): { message: string } {
+    if (message.coordinatorId === undefined) {
+      return { message: 'Invalid coordinator message' };
+    }
+    // Process asynchronously - don't block response
+    this.atmService
+      .handleCoordinatorMessage(message.coordinatorId, message.senderId)
+      .catch((error) => {
+        console.error(
+          `[ATMController] Error handling coordinator message: ${error.message}`,
+        );
+      });
+    return { message: 'Coordinator acknowledged' };
+  }
+
+  /**
+   * Endpoint to receive ring topology update from coordinator.
+   * The coordinator sends this after removing failed nodes or adding recovered nodes.
+   *
+   * @param body - The topology message with nextNodeId
+   * @returns Acknowledgment
+   *
+   * @example
+   * POST /atm/topology
+   * Body: { "coordinatorId": 4, "activeNodes": [1,3,4], "tokenId": "uuid", "nextNodeId": 3, "timestamp": "..." }
+   */
+  @Post('topology')
+  @HttpCode(200)
+  receiveTopology(@Body() body: TopologyMessage & { nextNodeId: number }): {
+    message: string;
+  } {
+    const { nextNodeId, ...topologyMessage } = body;
+    this.atmService.handleTopologyUpdate(topologyMessage, nextNodeId);
+    return { message: 'Topology updated' };
+  }
+
+  /**
+   * Endpoint to receive recovery announcement from a node that came back online.
+   * Only the coordinator handles this and reintegrates the node.
+   *
+   * @param message - The recovery message
+   * @returns Success status
+   *
+   * @example
+   * POST /atm/recovery
+   * Body: { "nodeId": 2, "timestamp": "..." }
+   */
+  @Post('recovery')
+  @HttpCode(200)
+  async receiveRecovery(
+    @Body() message: RecoveryMessage,
+  ): Promise<{ success: boolean; message: string }> {
+    const success = await this.atmService.handleRecoveryAnnouncement(
+      message.nodeId,
+    );
+    return {
+      success,
+      message: success
+        ? `Node ${message.nodeId} reintegrated into ring`
+        : `Failed to reintegrate node ${message.nodeId}`,
+    };
+  }
+
+  /**
+   * Endpoint to get election and coordinator information.
+   * Useful for debugging and monitoring.
+   *
+   * @returns Election status information
+   *
+   * @example
+   * GET /atm/coordinator-status
+   */
+  @Get('coordinator-status')
+  getCoordinatorStatus(): {
+    nodeId: number;
+    coordinatorId: number | null;
+    isCoordinator: boolean;
+  } {
+    return {
+      nodeId: this.atmService.getNodeId(),
+      coordinatorId: this.atmService.getCoordinatorId(),
+      isCoordinator: this.atmService.isCoordinator(),
     };
   }
 }

@@ -27,3 +27,33 @@ export const BASE_PORT = 3001;
  * For production implementations, this should be set to 0.
  */
 export const TOKEN_DISPLAY_DELAY = 5000; // 5 seconds
+
+/**
+ * Maximum number of retry attempts before declaring a node as failed.
+ * This is used in the failure detection mechanism of the Bully Algorithm.
+ */
+export const MAX_RETRY_ATTEMPTS = 5;
+
+/**
+ * Timeout in milliseconds for waiting for a response from another node.
+ * If a node doesn't respond within this time, it's considered unresponsive.
+ */
+export const NODE_RESPONSE_TIMEOUT = 3000; // 3 seconds
+
+/**
+ * Delay between retry attempts in milliseconds.
+ * Used when retrying communication with a potentially failed node.
+ */
+export const RETRY_DELAY = 2000; // 2 seconds
+
+/**
+ * Timeout in milliseconds for waiting for OK responses during election.
+ * If no OK received within this time, the node declares itself coordinator.
+ */
+export const ELECTION_TIMEOUT = 5000; // 5 seconds
+
+/**
+ * Timeout in milliseconds for waiting for COORDINATOR message.
+ * If no COORDINATOR message is received, a new election is started.
+ */
+export const COORDINATOR_TIMEOUT = 10000; // 10 seconds

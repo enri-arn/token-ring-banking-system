@@ -33,3 +33,65 @@ export interface BankAccount {
   /** Timestamp of the last balance update */
   lastUpdated: Date;
 }
+
+/**
+ * Message types for Bully Algorithm election protocol
+ */
+export type ElectionMessageType = 'ELECTION' | 'OK' | 'COORDINATOR';
+
+/**
+ * Message for Bully Algorithm election
+ */
+export interface ElectionMessage {
+  /** Type of election message */
+  type: ElectionMessageType;
+  /** ID of the node sending the message */
+  senderId: number;
+  /** ID of the new coordinator (only for COORDINATOR message) */
+  coordinatorId?: number;
+  /** Timestamp when message was sent */
+  timestamp: Date;
+}
+
+/**
+ * Message for node recovery announcement
+ */
+export interface RecoveryMessage {
+  /** ID of the node that is recovering */
+  nodeId: number;
+  /** Timestamp of recovery */
+  timestamp: Date;
+}
+
+/**
+ * Message for topology update from coordinator
+ */
+export interface TopologyMessage {
+  /** ID of the coordinator sending the update */
+  coordinatorId: number;
+  /** List of active node IDs in the ring */
+  activeNodes: number[];
+  /** ID of the token (for validation) */
+  tokenId?: string;
+  /** Timestamp of update */
+  timestamp: Date;
+}
+
+/**
+ * Node status in the ring
+ */
+export type NodeStatus = 'ACTIVE' | 'SUSPECTED' | 'FAILED' | 'RECOVERING';
+
+/**
+ * Information about a node in the ring
+ */
+export interface NodeInfo {
+  /** Node ID */
+  id: number;
+  /** Current status */
+  status: NodeStatus;
+  /** Timestamp of last successful communication */
+  lastSeen: Date;
+  /** Number of consecutive failures */
+  failureCount: number;
+}
