@@ -36,8 +36,10 @@ Each node:
 
 1. **Single Token**: A unique token circulates continuously through the ring, carrying the current account balance
 2. **Mutual Exclusion**: Only the token holder can access the critical section (execute transactions)
-3. **Token Hold Time**: Each node holds the token for up to 5 seconds to process transactions
-4. **Automatic Forwarding**: After processing, the node forwards the token to its successor
+3. **Token Forwarding Logic** (according to Token Ring algorithm):
+   - **Has pending transactions** → Executes ONE transaction, then forwards token to successor
+   - **No pending transactions** → Forwards token IMMEDIATELY to successor
+4. **Display Delay** (educational only): A configurable `TOKEN_DISPLAY_DELAY` (default 5 seconds) is added for visualization purposes when no transactions are pending. This is NOT part of the original algorithm and should be set to 0 in production implementations.
 
 ### Transaction Execution
 

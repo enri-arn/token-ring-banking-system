@@ -9,6 +9,7 @@ import {
   BASE_PORT,
   NUMBER_OF_NODES,
   INITIAL_BALANCE,
+  TOKEN_DISPLAY_DELAY,
 } from '../common/constants';
 
 /**
@@ -181,7 +182,15 @@ export class ATMService implements OnApplicationBootstrap {
   /**
    * Processes the token according to Token Ring algorithm:
    * - If has pending transactions: execute one transaction
-   * - If no pending transactions: wait briefly then forward token
+   * - If no pending transactions: forward token immediately
+   *
+   * NOTE: The correct Token Ring algorithm states:
+   * "When a node receives the token, it can do two things:
+   *  1. Has NO transactions → passes the token IMMEDIATELY
+   *  2. Has a transaction → enters the critical section"
+   *
+   * The TOKEN_DISPLAY_DELAY is added ONLY for educational/demonstration purposes
+   * to allow visualization of token circulation in logs during presentations.
    *
    * @private
    */
@@ -189,12 +198,19 @@ export class ATMService implements OnApplicationBootstrap {
     this.isProcessing = true;
     try {
       if (this.tokenService.canAccessCriticalSection()) {
-        // Execute the next pending transaction
+        // Has pending transactions: execute one transaction
         await this.executeNextTransaction();
       } else {
-        // No pending transactions: hold token for 5 seconds, then forward
-        this.logger.info('Holding token for 5 seconds...');
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        // No pending transactions: brief display delay, then forward immediately
+        // (In production, this delay should be 0 - token should be forwarded immediately)
+        if (TOKEN_DISPLAY_DELAY > 0) {
+          this.logger.info(
+            `No pending transactions. Holding token for ${TOKEN_DISPLAY_DELAY}ms (display only)...`,
+          );
+          await new Promise((resolve) =>
+            setTimeout(resolve, TOKEN_DISPLAY_DELAY),
+          );
+        }
         await this.forwardToken();
       }
     } finally {
