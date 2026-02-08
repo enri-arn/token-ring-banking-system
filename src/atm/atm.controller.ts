@@ -5,6 +5,9 @@ import {
   ElectionMessage,
   RecoveryMessage,
   TopologyMessage,
+  TokenStatusVoteRequest,
+  TokenStatusVoteResponse,
+  InvalidateTokenCommand,
 } from '../common/types';
 
 /**
@@ -229,5 +232,46 @@ export class ATMController {
       coordinatorId: this.atmService.getCoordinatorId(),
       isCoordinator: this.atmService.isCoordinator(),
     };
+  }
+
+  /**
+   * Endpoint to vote on token status (consensus mechanism).
+   * The coordinator requests all nodes to report if they have the token.
+   * This prevents race conditions when deciding between Scenario A and B.
+   *
+   * @param request - The vote request from coordinator
+   * @returns Token status information
+   *
+   * @example
+   * POST /atm/token-status-vote
+   * Body: { "requestId": "uuid", "coordinatorId": 4, "timestamp": "..." }
+   */
+  @Post('token-status-vote')
+  @HttpCode(200)
+  voteTokenStatus(
+    @Body() request: TokenStatusVoteRequest,
+  ): TokenStatusVoteResponse {
+    return this.atmService.voteTokenStatus(request);
+  }
+
+  /**
+   * Endpoint to receive command to invalidate old token.
+   * The coordinator sends this before regenerating a new token
+   * to ensure no duplicate tokens exist in the system.
+   *
+   * @param command - The invalidation command from coordinator
+   * @returns Acknowledgment
+   *
+   * @example
+   * POST /atm/invalidate-token
+   * Body: { "coordinatorId": 4, "reason": "Token lost, regenerating", "timestamp": "..." }
+   */
+  @Post('invalidate-token')
+  @HttpCode(200)
+  invalidateToken(
+    @Body() command: InvalidateTokenCommand,
+  ): { message: string } {
+    this.atmService.invalidateToken(command);
+    return { message: 'Token invalidated' };
   }
 }

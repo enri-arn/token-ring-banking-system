@@ -6,7 +6,13 @@ import { TokenService } from '../token/token.service';
 import { ElectionService } from '../election/election.service';
 import { CoordinatorService } from '../coordinator/coordinator.service';
 import { Logger } from '../common/logger';
-import { Token, TopologyMessage } from '../common/types';
+import {
+  Token,
+  TopologyMessage,
+  TokenStatusVoteRequest,
+  TokenStatusVoteResponse,
+  InvalidateTokenCommand,
+} from '../common/types';
 import {
   BASE_PORT,
   NUMBER_OF_NODES,
@@ -14,6 +20,7 @@ import {
   TOKEN_DISPLAY_DELAY,
   MAX_RETRY_ATTEMPTS,
   RETRY_DELAY,
+  TOKEN_CIRCULATION_TIMEOUT,
 } from '../common/constants';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -57,6 +64,24 @@ export class ATMService implements OnApplicationBootstrap {
   private isProcessing: boolean = false;
 
   /**
+   * Timestamp of when this node last saw the token (received or forwarded)
+   * Used for Scenario A: Token Lost detection
+   */
+  private lastTokenSeen: Date | null = null;
+
+  /**
+   * Last known balance in the token
+   * Used for Scenario A: Token regeneration with correct balance
+   */
+  private lastKnownBalance: number = INITIAL_BALANCE;
+
+  /**
+   * Interval handle for monitoring token circulation
+   * Used for Scenario A: Detecting when token is lost
+   */
+  private tokenCirculationMonitor: NodeJS.Timeout | null = null;
+
+  /**
    * Creates a new ATMService instance
    * @param bankingService - The shared banking service
    * @param tokenService - The token management service
@@ -76,16 +101,30 @@ export class ATMService implements OnApplicationBootstrap {
    * Lifecycle hook called after application bootstrap (all modules initialized and ready).
    * Reads NODE_ID from environment variable and initializes the ATM node.
    * If NODE_ID is not set, defaults to 1.
-   * If this is node 1, creates and starts the initial token.
+   * If this is node 1 AND no other nodes are active, creates and starts the initial token.
+   * Otherwise, behaves as a recovering node.
    */
   async onApplicationBootstrap() {
     const nodeId = parseInt(process.env.NODE_ID || '1', 10);
     await this.initialize(nodeId);
 
-    // Only node 1 creates the initial token
+    // Only node 1 creates the initial token, but ONLY if it's the first node starting
+    // Check if other nodes are already active before creating token
     if (nodeId === 1) {
-      await this.createInitialToken();
-      this.logger.info('Token Ring initialized. Token circulation started.');
+      const otherNodesActive = await this.checkIfOtherNodesActive();
+
+      if (!otherNodesActive) {
+        // We're the first node - create initial token and start circulation
+        this.logger.info('First node to start - creating initial token');
+        await this.createInitialToken();
+        this.logger.info('Token Ring initialized. Token circulation started.');
+      } else {
+        // Other nodes are active - this is a recovery, not initial startup
+        this.logger.info(
+          'Detected other active nodes - treating as recovery (not creating token)',
+        );
+        // Fall through to recovery announcement below
+      }
     }
 
     // After initialization, announce presence to coordinator
@@ -125,6 +164,9 @@ export class ATMService implements OnApplicationBootstrap {
     this.coordinatorService.setCoordinatorStatus(
       this.electionService.isCurrentCoordinator(),
     );
+
+    // Start monitoring token circulation (Scenario A)
+    this.startTokenCirculationMonitor();
 
     this.logger.info(
       `ATM${nodeId} initialized. Next node: ATM${this.nextNodeId}`,
@@ -173,6 +215,10 @@ export class ATMService implements OnApplicationBootstrap {
     const token = this.tokenService.createToken(this.nodeId, INITIAL_BALANCE);
     this.tokenService.receiveToken(token);
 
+    // Track initial token for Scenario A monitoring
+    this.lastTokenSeen = new Date();
+    this.lastKnownBalance = INITIAL_BALANCE;
+
     // Wait for other nodes to start up before beginning circulation
     this.logger.info('Waiting 10 seconds for other nodes to start...');
     await new Promise((resolve) => setTimeout(resolve, 10000));
@@ -210,6 +256,10 @@ export class ATMService implements OnApplicationBootstrap {
       this.logger.info('Token rejected (duplicate or invalid), ignoring');
       return;
     }
+
+    // Update token circulation monitoring (Scenario A)
+    this.lastTokenSeen = new Date();
+    this.lastKnownBalance = token.balance;
 
     // Mark next node as active (successful communication)
     this.electionService.markNodeAsActive(this.nextNodeId);
@@ -297,6 +347,9 @@ export class ATMService implements OnApplicationBootstrap {
       // Update balance in token
       this.tokenService.updateBalance(newBalance);
 
+      // Track last known balance for Scenario A (token regeneration)
+      this.lastKnownBalance = newBalance;
+
       this.logger.transactionCompleted(
         transaction.type,
         transaction.amount,
@@ -343,6 +396,10 @@ export class ATMService implements OnApplicationBootstrap {
         // Success! Mark node as active and release the token
         this.electionService.markNodeAsActive(this.nextNodeId);
         this.tokenService.releaseToken();
+
+        // Update token seen timestamp (Scenario A monitoring)
+        this.lastTokenSeen = new Date();
+
         return;
       } catch (error) {
         this.logger.error(
@@ -387,6 +444,16 @@ export class ATMService implements OnApplicationBootstrap {
         );
         await this.verifyAllNodesHealth();
         // The health check will handle all failed nodes including the one we just detected
+
+        // CRITICAL: If we still have the token after becoming coordinator, forward it!
+        // This handles the case where we tried to forward to a failed node, became coordinator,
+        // and now need to forward with the updated topology
+        if (this.tokenService.hasToken()) {
+          this.logger.info(
+            'Still holding token after becoming coordinator - forwarding with new topology',
+          );
+          await this.forwardToken();
+        }
       }
     }
   }
@@ -484,33 +551,15 @@ export class ATMService implements OnApplicationBootstrap {
       );
       await this.forwardToken();
     } else {
-      // Scenario A might have occurred: Token may be lost
-      // We need to determine if the failed node had the token
-      // For simplicity, wait a bit to see if token comes back
+      // Token may be lost (Scenario A)
+      // Don't regenerate here - let the token circulation monitor detect and handle it
+      // The monitor will trigger handleTokenLost() which properly handles:
+      // 1. Election to select coordinator
+      // 2. Token regeneration with correct balance
+      // 3. Topology broadcast with new tokenId
       this.logger.info(
-        'Waiting to check if token returns (may be Scenario A)...',
+        'Token may be lost. Token circulation monitor will detect and regenerate if needed.',
       );
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-
-      // If still no token in the system, regenerate it (Scenario A)
-      if (!this.tokenService.hasToken()) {
-        this.logger.info('*** SCENARIO A *** Token was lost, regenerating...');
-        const newTokenId = uuidv4();
-        const lastKnownBalance =
-          this.tokenService.getBalance() || INITIAL_BALANCE;
-        const newToken = this.coordinatorService.regenerateToken(
-          newTokenId,
-          lastKnownBalance,
-        );
-
-        // Set valid token ID in token service
-        this.tokenService.setValidTokenId(newTokenId);
-
-        // Receive the new token and start circulation
-        this.tokenService.receiveToken(newToken);
-        this.logger.info('New token created, starting circulation');
-        await this.processToken();
-      }
     }
   }
 
@@ -668,6 +717,23 @@ export class ATMService implements OnApplicationBootstrap {
 
     // Update active nodes in coordinator service (for when we become coordinator)
     this.coordinatorService.updateActiveNodes(topologyMessage.activeNodes);
+
+    // CRITICAL: If we have the token after receiving topology update, forward it!
+    // This handles the case where we tried to forward to a failed node,
+    // received new topology, and now need to forward with updated next node
+    // BUT: Only forward if we're NOT already processing the token normally!
+    // This prevents race condition where we forward twice (once from normal flow, once from topology)
+    if (this.tokenService.hasToken() && !this.isProcessing) {
+      this.logger.info(
+        'Still holding token after topology update - forwarding with new topology',
+      );
+      // Forward asynchronously to not block the topology update response
+      this.forwardToken().catch((error) => {
+        this.logger.error(
+          `Error forwarding token after topology update: ${error.message}`,
+        );
+      });
+    }
   }
 
   /**
@@ -804,6 +870,212 @@ export class ATMService implements OnApplicationBootstrap {
   }
 
   /**
+   * Checks if any other nodes (besides this one) are already active.
+   * Used by ATM1 to determine if this is initial system startup or a recovery.
+   * @returns true if at least one other node is active, false otherwise
+   * @private
+   */
+  private async checkIfOtherNodesActive(): Promise<boolean> {
+    this.logger.info('Checking if other nodes are active...');
+
+    // Try to contact all other nodes
+    for (let id = 2; id <= NUMBER_OF_NODES; id++) {
+      const port = BASE_PORT + id - 1;
+      const url = `http://127.0.0.1:${port}/atm/health`;
+
+      try {
+        const response = await firstValueFrom(
+          this.httpService.get(url, { timeout: 1000 }),
+        );
+
+        if (response.data?.status === 'ok') {
+          this.logger.info(`Found active node: ATM${id}`);
+          return true;
+        }
+      } catch (error) {
+        this.logger.error(`Error checking node ${id} health: ${error.message}`);
+        // Node not responding - try next
+        continue;
+      }
+    }
+
+    this.logger.info('No other active nodes found - this is initial startup');
+    return false;
+  }
+
+  /**
+   * Starts monitoring token circulation for Scenario A (token lost detection).
+   * Checks periodically if the token hasn't been seen for too long.
+   * If timeout is exceeded, triggers token lost handling.
+   * @private
+   */
+  private startTokenCirculationMonitor(): void {
+    // Stop any existing monitor
+    this.stopTokenCirculationMonitor();
+
+    // Check every 5 seconds if token circulation has stopped
+    this.tokenCirculationMonitor = setInterval(() => {
+      // If we've never seen the token, skip check (initial startup)
+      if (!this.lastTokenSeen) {
+        return;
+      }
+
+      const now = new Date();
+      const timeSinceLastSeen = now.getTime() - this.lastTokenSeen.getTime();
+
+      if (timeSinceLastSeen > TOKEN_CIRCULATION_TIMEOUT) {
+        this.logger.info(
+          `*** TOKEN LOST DETECTED *** (not seen for ${timeSinceLastSeen / 1000}s)`,
+        );
+        // Stop monitoring to prevent multiple triggers
+        this.stopTokenCirculationMonitor();
+        // Handle token lost scenario
+        this.handleTokenLost().catch((error) => {
+          this.logger.error(`Error handling token lost: ${error.message}`);
+        });
+      }
+    }, 5000); // Check every 5 seconds
+  }
+
+  /**
+   * Stops monitoring token circulation.
+   * @private
+   */
+  private stopTokenCirculationMonitor(): void {
+    if (this.tokenCirculationMonitor) {
+      clearInterval(this.tokenCirculationMonitor);
+      this.tokenCirculationMonitor = null;
+    }
+  }
+
+  /**
+   * Handles Scenario A: Token Lost.
+   * When a node detects the token has been lost (circulation timeout):
+   * 1. Starts an election to select a coordinator
+   * 2. The coordinator conducts a vote among all nodes to verify token is truly lost
+   * 3. If token is found on any node → Scenario B (no regeneration needed)
+   * 4. If no node has the token → Scenario A (regenerate with consensus)
+   * @private
+   */
+  private async handleTokenLost(): Promise<void> {
+    this.logger.info(
+      'Handling token lost scenario - starting election to coordinate decision',
+    );
+
+    // Start election to select coordinator for token loss handling
+    await this.electionService.startElection();
+
+    // Wait for election to complete
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    // If we became coordinator, conduct consensus vote
+    if (this.electionService.isCurrentCoordinator()) {
+      this.logger.info(
+        'I am coordinator - conducting consensus vote on token status',
+      );
+
+      // Sync coordinator status
+      this.coordinatorService.setCoordinatorStatus(true);
+
+      // Verify health of all nodes before making decisions
+      await this.verifyAllNodesHealth();
+
+      // Get active nodes from coordinator service
+      const activeNodes = this.coordinatorService.getActiveNodes();
+      if (activeNodes.length === 0) {
+        this.logger.error('No active nodes found, cannot handle token lost');
+        return;
+      }
+
+      // Conduct token status vote
+      const votes = await this.conductTokenStatusVote();
+
+      // Check if any node has the token
+      const nodesWithToken = votes.filter((v) => v.hasToken);
+
+      if (nodesWithToken.length > 0) {
+        // Scenario B: At least one node has the token
+        // Token is NOT lost, just slow circulation or temporary issue
+        this.logger.info(
+          `*** SCENARIO B *** Token found on ${nodesWithToken.length} node(s): ${nodesWithToken.map((v) => `ATM${v.nodeId}`).join(', ')}`,
+        );
+        this.logger.info(
+          'No regeneration needed - token will continue circulating',
+        );
+
+        // Update our last known balance from the node that has the token
+        const tokenHolder = nodesWithToken[0];
+        if (tokenHolder.balance !== null) {
+          this.lastKnownBalance = tokenHolder.balance;
+        }
+
+        // Restart monitoring
+        this.startTokenCirculationMonitor();
+      } else {
+        // Scenario A: No node has the token - token is truly lost
+        this.logger.info(
+          '*** SCENARIO A *** Token truly lost - regenerating with consensus',
+        );
+
+        // CRITICAL: Invalidate any old tokens before regenerating
+        await this.broadcastInvalidateToken(
+          'Token lost, regenerating new token',
+        );
+
+        // CRITICAL: Coordinator must disable its own token rejection to accept the new token
+        // Other nodes will remain blocked until they receive topology update with new tokenId
+        this.tokenService.disableTokenRejection();
+
+        // Use highest balance from votes (or last known balance)
+        let maxBalance = this.lastKnownBalance;
+        for (const vote of votes) {
+          if (vote.balance !== null && vote.balance > maxBalance) {
+            maxBalance = vote.balance;
+          }
+        }
+        this.lastKnownBalance = maxBalance;
+
+        // Regenerate token with consensus-determined balance
+        const newTokenId = uuidv4();
+        const regeneratedToken = this.coordinatorService.regenerateToken(
+          newTokenId,
+          this.lastKnownBalance,
+        );
+
+        // Update our token service with the new token
+        this.tokenService.receiveToken(regeneratedToken);
+        this.coordinatorService.setCurrentTokenId(newTokenId);
+
+        // Update last token seen
+        this.lastTokenSeen = new Date();
+
+        // IMPORTANT: Broadcast new tokenId to all nodes via topology
+        // This ensures all nodes know which token to accept
+        const currentTopology = this.coordinatorService.reconstructRing();
+        await this.coordinatorService.broadcastTopology(currentTopology);
+
+        // Restart circulation monitoring
+        this.startTokenCirculationMonitor();
+
+        // Start circulating the regenerated token
+        this.logger.info(
+          `Token regenerated (ID: ${newTokenId}, Balance: $${this.lastKnownBalance}). Restarting circulation...`,
+        );
+        await this.processToken();
+      }
+    } else {
+      // Not coordinator - restart monitoring and wait for decision from coordinator
+      this.logger.info(
+        'Not coordinator - waiting for coordinator decision on token status',
+      );
+      // The monitor will continue, and we'll either:
+      // - Receive the token if it was found (Scenario B)
+      // - Receive a new token from coordinator (Scenario A)
+      this.startTokenCirculationMonitor();
+    }
+  }
+
+  /**
    * Gets the current coordinator ID
    * @returns The coordinator ID or null if unknown
    */
@@ -817,5 +1089,210 @@ export class ATMService implements OnApplicationBootstrap {
    */
   isCoordinator(): boolean {
     return this.electionService.isCurrentCoordinator();
+  }
+
+  /**
+   * Handles a token status vote request from the coordinator.
+   * Each node reports whether it currently has the token.
+   * This is used for consensus-based decision making.
+   *
+   * @param request - The vote request from coordinator
+   * @returns Token status information
+   */
+  voteTokenStatus(request: TokenStatusVoteRequest): TokenStatusVoteResponse {
+    const token = this.tokenService.getToken();
+    const response: TokenStatusVoteResponse = {
+      nodeId: this.nodeId,
+      hasToken: token !== null,
+      tokenId: token?.id ?? null,
+      balance: token?.balance ?? null,
+      timestamp: new Date(),
+    };
+
+    this.logger.info(
+      `Token status vote (request: ${request.requestId}): ${response.hasToken ? 'HAS TOKEN' : 'NO TOKEN'}`,
+    );
+
+    return response;
+  }
+
+  /**
+   * Handles an invalidate token command from the coordinator.
+   * This node must discard any old token to prevent duplicates.
+   *
+   * @param command - The invalidation command
+   */
+  invalidateToken(command: InvalidateTokenCommand): void {
+    this.logger.info(
+      `*** TOKEN INVALIDATION *** Coordinator ATM${command.coordinatorId} ordered: ${command.reason}`,
+    );
+
+    // Discard current token if we have one
+    if (this.tokenService.hasToken()) {
+      const token = this.tokenService.getToken();
+      this.logger.info(
+        `Discarding old token ${token?.id} as ordered by coordinator`,
+      );
+      this.tokenService.discardToken();
+    }
+
+    // CRITICAL: Enable token rejection mode to block old tokens "in flight"
+    this.tokenService.enableTokenRejection();
+
+    // Clear valid token ID - will be set by coordinator with new token
+    this.tokenService.clearValidTokenId();
+
+    this.logger.info(
+      'Ready to accept new token from coordinator (blocking all old tokens)',
+    );
+  }
+
+  /**
+   * Conducts a token status vote among all active nodes (coordinator only).
+   * Collects responses from all nodes to decide if token is truly lost.
+   *
+   * @returns Array of vote responses from all reachable nodes
+   * @private
+   */
+  private async conductTokenStatusVote(): Promise<TokenStatusVoteResponse[]> {
+    if (!this.electionService.isCurrentCoordinator()) {
+      throw new Error('Only coordinator can conduct token status vote');
+    }
+
+    this.logger.info('*** CONDUCTING TOKEN STATUS VOTE ***');
+
+    const voteRequest: TokenStatusVoteRequest = {
+      requestId: uuidv4(),
+      coordinatorId: this.nodeId,
+      timestamp: new Date(),
+    };
+
+    const activeNodes = this.coordinatorService.getActiveNodes();
+    const responses: TokenStatusVoteResponse[] = [];
+
+    // Vote ourselves first
+    const ourVote = this.voteTokenStatus(voteRequest);
+    responses.push(ourVote);
+
+    // Collect votes from all other active nodes
+    const votePromises = activeNodes
+      .filter((nodeId) => nodeId !== this.nodeId)
+      .map((nodeId) => this.requestTokenStatusVote(nodeId, voteRequest));
+
+    const results = await Promise.allSettled(votePromises);
+
+    // Collect successful responses
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) {
+        responses.push(result.value);
+      }
+    }
+
+    this.logger.info(`Vote complete: ${responses.length} responses received`);
+
+    // Log vote summary
+    const nodesWithToken = responses.filter((r) => r.hasToken);
+    if (nodesWithToken.length > 0) {
+      this.logger.info(
+        `Nodes with token: ${nodesWithToken.map((r) => `ATM${r.nodeId}`).join(', ')}`,
+      );
+    } else {
+      this.logger.info('No node has the token - token is truly lost');
+    }
+
+    return responses;
+  }
+
+  /**
+   * Requests a token status vote from a specific node
+   * @param nodeId - The target node ID
+   * @param request - The vote request
+   * @returns The vote response or null if failed
+   * @private
+   */
+  private async requestTokenStatusVote(
+    nodeId: number,
+    request: TokenStatusVoteRequest,
+  ): Promise<TokenStatusVoteResponse | null> {
+    const targetPort = BASE_PORT + nodeId - 1;
+    const targetUrl = `http://127.0.0.1:${targetPort}/atm/token-status-vote`;
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.post<TokenStatusVoteResponse>(targetUrl, request, {
+          timeout: 3000,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      return response.data;
+    } catch (error) {
+      this.logger.error(
+        `Failed to get vote from ATM${nodeId}: ${error.message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Broadcasts invalidate token command to all active nodes (coordinator only).
+   * This ensures all nodes discard old tokens before regenerating.
+   *
+   * @param reason - Reason for invalidation
+   * @private
+   */
+  private async broadcastInvalidateToken(reason: string): Promise<void> {
+    if (!this.electionService.isCurrentCoordinator()) {
+      throw new Error('Only coordinator can broadcast invalidate token');
+    }
+
+    this.logger.info('*** BROADCASTING TOKEN INVALIDATION ***');
+
+    const command: InvalidateTokenCommand = {
+      coordinatorId: this.nodeId,
+      reason: reason,
+      timestamp: new Date(),
+    };
+
+    const activeNodes = this.coordinatorService.getActiveNodes();
+
+    // Invalidate our own token first
+    this.invalidateToken(command);
+
+    // Send invalidate command to all other active nodes
+    const promises = activeNodes
+      .filter((nodeId) => nodeId !== this.nodeId)
+      .map((nodeId) => this.sendInvalidateToken(nodeId, command));
+
+    await Promise.allSettled(promises);
+
+    this.logger.info('Token invalidation broadcast complete');
+  }
+
+  /**
+   * Sends invalidate token command to a specific node
+   * @param nodeId - The target node ID
+   * @param command - The invalidation command
+   * @private
+   */
+  private async sendInvalidateToken(
+    nodeId: number,
+    command: InvalidateTokenCommand,
+  ): Promise<void> {
+    const targetPort = BASE_PORT + nodeId - 1;
+    const targetUrl = `http://127.0.0.1:${targetPort}/atm/invalidate-token`;
+
+    try {
+      await firstValueFrom(
+        this.httpService.post(targetUrl, command, {
+          timeout: 3000,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      this.logger.info(`Invalidate token sent to ATM${nodeId}`);
+    } catch (error) {
+      this.logger.error(
+        `Failed to send invalidate token to ATM${nodeId}: ${error.message}`,
+      );
+    }
   }
 }

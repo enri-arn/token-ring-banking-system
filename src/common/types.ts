@@ -95,3 +95,43 @@ export interface NodeInfo {
   /** Number of consecutive failures */
   failureCount: number;
 }
+
+/**
+ * Request for token status vote (consensus mechanism)
+ */
+export interface TokenStatusVoteRequest {
+  /** Unique ID for this vote request */
+  requestId: string;
+  /** ID of the coordinator requesting the vote */
+  coordinatorId: number;
+  /** Timestamp of the request */
+  timestamp: Date;
+}
+
+/**
+ * Response to token status vote
+ */
+export interface TokenStatusVoteResponse {
+  /** ID of the node responding */
+  nodeId: number;
+  /** Whether this node currently has the token */
+  hasToken: boolean;
+  /** ID of the token if held, null otherwise */
+  tokenId: string | null;
+  /** Balance in the token if held, null otherwise */
+  balance: number | null;
+  /** Timestamp of the response */
+  timestamp: Date;
+}
+
+/**
+ * Command to invalidate old tokens (prevent duplicates)
+ */
+export interface InvalidateTokenCommand {
+  /** ID of the coordinator issuing the command */
+  coordinatorId: number;
+  /** Reason for invalidation */
+  reason: string;
+  /** Timestamp of the command */
+  timestamp: Date;
+}

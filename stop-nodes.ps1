@@ -20,9 +20,9 @@ if ($nodeProcesses) {
         try {
             Write-Host "Stopping process $($process.Id)..." -ForegroundColor Red
             Stop-Process -Id $process.Id -Force
-            Write-Host "  ✓ Process $($process.Id) stopped" -ForegroundColor Green
+            Write-Host "  [OK] Process $($process.Id) stopped" -ForegroundColor Green
         } catch {
-            Write-Host "  ✗ Failed to stop process $($process.Id): $_" -ForegroundColor Red
+            Write-Host "  [ERROR] Failed to stop process $($process.Id): $_" -ForegroundColor Red
         }
     }
     

@@ -115,10 +115,52 @@ When a node detects coordinator failure, it initiates an election:
 
 **Scenario A: Token Lost (Node with Token Crashes)**
 
-1. Nodes detect token circulation has stopped
-2. Election is triggered to select a coordinator
-3. New coordinator regenerates the token with last known balance
-4. Token circulation resumes through the ring
+The system implements automatic token lost detection with **consensus-based decision making** to prevent duplicate tokens:
+
+1. **Token Circulation Monitoring**:
+   - Each node tracks `lastTokenSeen` timestamp (updated on receive/forward)
+   - Every 5 seconds, nodes check if token circulation timeout (30s) is exceeded
+   - If timeout exceeded → token is declared lost
+
+2. **Detection and Coordinator Election**:
+   - Node detecting loss logs: `*** TOKEN LOST DETECTED ***`
+   - Election is triggered to select a coordinator for handling the situation
+   - All nodes participate in Bully Algorithm election
+
+3. **Consensus Vote (Critical for Preventing Duplicates)**:
+   - **Coordinator conducts a token status vote** among all active nodes
+   - Each node reports: `hasToken: boolean`, `tokenId`, and `balance`
+   - Coordinator collects all responses and makes decision:
+     - **If ANY node has the token** → Scenario B (no regeneration needed)
+     - **If NO node has the token** → True token loss, proceed to regeneration
+
+4. **Token Invalidation (Before Regeneration)**:
+   - Coordinator broadcasts `INVALIDATE_TOKEN` command to all nodes
+   - All nodes discard any old tokens they may have
+   - This prevents race conditions where a node might have an old token
+
+5. **Token Regeneration**:
+   - Coordinator regenerates token using highest balance from consensus votes
+   - Token gets new UUID but preserves account balance
+   - New token ID is broadcast in topology update
+   - All nodes validate incoming tokens against the new token ID
+
+6. **Circulation Resumes**:
+   - Coordinator starts circulating the regenerated token
+   - All nodes restart their circulation monitoring
+   - System continues normal operation with preserved account balance
+
+**Why Consensus Prevents Duplicates**:
+- Without consensus, multiple nodes detecting "token lost" simultaneously could each start elections and regenerate tokens independently
+- The coordinator's consensus vote ensures only ONE decision is made by ONE coordinator
+- Token invalidation guarantees no old tokens survive the regeneration process
+- Token ID validation prevents duplicate tokens from being accepted
+
+**Important**: ATM1 special behavior to prevent duplicate tokens:
+- On startup, ATM1 checks if other nodes are active
+- If other nodes found → treats as recovery (no token creation)
+- If no other nodes → creates initial token (first system startup)
+- This prevents creating duplicate tokens when ATM1 recovers
 
 **Scenario B: Node Failure Without Token**
 
@@ -138,11 +180,14 @@ When a node detects coordinator failure, it initiates an election:
 
 #### Fault Tolerance Features
 
-- **Automatic retry mechanism**: Handles temporary unavailability (5-second retries)
-- **Token regeneration**: Coordinator recreates lost tokens
+- **Token circulation monitoring**: Each node monitors token circulation with 30-second timeout
+- **Automatic retry mechanism**: Handles temporary unavailability (5 retries with 2-second delays)
+- **Token regeneration**: Coordinator recreates lost tokens with preserved balance
+- **Balance preservation**: Each node tracks last known balance for accurate token regeneration
 - **Dynamic topology**: Ring automatically adjusts to node failures/recoveries
 - **Coordinator election**: Bully Algorithm ensures a coordinator is always available
 - **Node health checks**: Coordinator validates recovered nodes before reintegration
+- **Duplicate token prevention**: ATM1 checks for active nodes before creating initial token
 - **No single point of failure**: Any active node can become coordinator
 
 ## Description
@@ -272,12 +317,43 @@ Expected: Bully Algorithm elects ATM3 as new coordinator
 
 ### 5. Token Regeneration Test (Scenario A)
 ```powershell
-# Identify which node has token (check logs)
-# Stop that node (Ctrl+C)
-# Wait for election and token regeneration
-# Verify token circulation resumes with new token
+# Step 1: Start system and do a transaction to change balance
+.\start-nodes.ps1
+Start-Sleep -Seconds 20
+.\transaction.ps1 -NodeId 2 -Type deposit -Amount 500
+Start-Sleep -Seconds 10  # Wait for transaction execution
+
+# Step 2: Verify balance is $1500
+.\check-status.ps1
+
+# Step 3: Identify which node has token (check logs - look for "Token received")
+# Example: Suppose ATM3 has the token
+
+# Step 4: Stop the node holding the token (Ctrl+C in that terminal)
+# For example, stop ATM3
+
+# Step 5: Wait ~30 seconds - observe logs in other nodes:
+# - "*** TOKEN LOST DETECTED ***" (after 30 second timeout)
+# - Election messages: "Starting election (Bully Algorithm)"
+# - New coordinator elected (e.g., ATM4)
+# - "*** REGENERATING TOKEN *** (balance: $1500)"
+# - "Token regenerated (ID: xxx, Balance: $1500)"
+
+# Step 6: Verify circulation resumes with correct balance
+.\check-status.ps1
+# Balance should be $1500 (preserved from before crash)
+
+# Step 7: Test ATM1 recovery behavior
+# If ATM1 was stopped, restart it:
+$env:NODE_ID=1; $env:PORT=3001; npm run start:dev
+# Watch logs - should see: "Detected other active nodes - treating as recovery"
+# Should NOT see: "Creating initial token" (prevents duplicate tokens!)
 ```
-Expected: Coordinator regenerates token and circulation continues
+Expected:
+- Token lost detection after 30 seconds
+- Coordinator regenerates token with preserved balance ($1500)
+- Circulation resumes through active nodes
+- ATM1 does not create duplicate token on recovery
 
 ### 6. Ring Reconstruction Test (Scenario B)
 ```powershell
@@ -301,25 +377,75 @@ Expected: ATM2 reintegrates into ring, topology updates, circulation includes AT
 Each node produces structured logs:
 - **[INFO]** Token received/forwarded events
 - **[INFO]** Transaction execution start/completion
+- **[INFO]** Token circulation monitoring (Scenario A detection)
 - **[INFO]** Election messages (ELECTION, OK, COORDINATOR)
 - **[INFO]** Coordinator activities (token regeneration, ring reconstruction, topology broadcast)
 - **[INFO]** Node status changes (active, failed, recovered)
 - **[SUCCESS]** Successful transaction with balance update
 - **[ERROR]** Failed operations (insufficient funds, network errors, election failures)
 
-Example log:
+Example logs for different scenarios:
+
+**Normal Operation:**
 ```
-[2026-02-04T19:39:59.435Z] [ATM1] [INFO] Token received
-[2026-02-04T19:39:59.435Z] [ATM1] [INFO] Transaction started: deposit $100
-[2026-02-04T19:39:59.436Z] [ATM1] [SUCCESS] Transaction completed: deposit $100 | New balance: $1100
-[2026-02-04T19:39:59.436Z] [ATM1] [INFO] Token forwarded to ATM2
-[2026-02-04T19:40:15.123Z] [ATM3] [INFO] Starting election (Bully Algorithm)
-[2026-02-04T19:40:15.456Z] [ATM4] [INFO] *** BECAME COORDINATOR ***
-[2026-02-04T19:40:20.789Z] [ATM4] [INFO] *** REGENERATING TOKEN *** (balance: $1100)
-[2026-02-04T19:40:21.012Z] [ATM4] [INFO] *** RECONSTRUCTING RING TOPOLOGY ***
+[2026-02-07T14:47:25.229Z] [ATM1] [INFO] Token received
+[2026-02-07T14:47:25.229Z] [ATM1] [INFO] No pending transactions. Holding token for 5000ms (display only)...
+[2026-02-07T14:47:30.240Z] [ATM1] [INFO] Token forwarded to ATM2
+```
+
+**Transaction Execution:**
+```
+[2026-02-07T14:46:15.060Z] [ATM2] [INFO] Transaction started: deposit $200
+[2026-02-07T14:46:15.060Z] [ATM2] [SUCCESS] Transaction completed: deposit $200 | New balance: $1100
+[2026-02-07T14:46:15.060Z] [ATM2] [INFO] Token forwarded to ATM3
+```
+
+**Scenario A - Token Lost Detection and Regeneration:**
+```
+[2026-02-07T15:15:30.456Z] [ATM2] [INFO] *** TOKEN LOST DETECTED *** (not seen for 30.2s)
+[2026-02-07T15:15:30.456Z] [ATM2] [INFO] Handling token lost scenario - starting election to regenerate token
+[2026-02-07T15:15:30.460Z] [ATM2] [INFO] Starting election (Bully Algorithm)
+[2026-02-07T15:15:30.475Z] [ATM4] [INFO] Received ELECTION from ATM2
+[2026-02-07T15:15:35.680Z] [ATM4] [INFO] *** BECAME COORDINATOR ***
+[2026-02-07T15:15:35.685Z] [ATM4] [INFO] I am coordinator - regenerating lost token
+[2026-02-07T15:15:36.120Z] [ATM4] [INFO] *** REGENERATING TOKEN *** (balance: $1500)
+[2026-02-07T15:15:36.125Z] [ATM4] [INFO] Token regenerated (ID: abc-123..., Balance: $1500). Restarting circulation...
+[2026-02-07T15:15:36.130Z] [ATM4] [INFO] Token forwarded to ATM1
+```
+
+**Scenario B - Ring Reconstruction:**
+```
+[2026-02-07T14:46:00.007Z] [ATM4] [INFO] *** NODE FAILURE *** Removing ATM1 from ring
+[2026-02-07T14:46:00.007Z] [ATM4] [INFO] *** RECONSTRUCTING RING TOPOLOGY ***
+[2026-02-07T14:46:00.007Z] [ATM4] [INFO] ATM2 -> ATM3
+[2026-02-07T14:46:00.007Z] [ATM4] [INFO] ATM3 -> ATM4
+[2026-02-07T14:46:00.007Z] [ATM4] [INFO] ATM4 -> ATM2
+[2026-02-07T14:46:00.015Z] [ATM4] [INFO] Broadcasting topology to all active nodes
+```
+
+**ATM1 Recovery (No Duplicate Token):**
+```
+[2026-02-07T14:47:02.900Z] [ATM1] [INFO] Checking if other nodes are active...
+[2026-02-07T14:47:02.912Z] [ATM1] [INFO] Found active node: ATM2
+[2026-02-07T14:47:02.913Z] [ATM1] [INFO] Detected other active nodes - treating as recovery (not creating token)
+[2026-02-07T14:47:07.935Z] [ATM1] [INFO] *** ANNOUNCING RECOVERY TO COORDINATOR ***
 ```
 
 ## Implementation Details
+
+### Key Configuration Constants
+
+The system uses the following configurable constants (src/common/constants.ts):
+
+- **`INITIAL_BALANCE`**: $1000 - Starting balance for the shared account
+- **`NUMBER_OF_NODES`**: 4 - Total ATM nodes in the ring
+- **`TOKEN_DISPLAY_DELAY`**: 5000ms - Educational delay for visualizing token circulation (set to 0 for production)
+- **`TOKEN_CIRCULATION_TIMEOUT`**: 30000ms (30s) - Timeout for detecting lost tokens (Scenario A)
+- **`MAX_RETRY_ATTEMPTS`**: 5 - Maximum retry attempts before declaring node failed
+- **`RETRY_DELAY`**: 2000ms - Delay between retry attempts
+- **`NODE_RESPONSE_TIMEOUT`**: 3000ms - Timeout for node responses
+- **`ELECTION_TIMEOUT`**: 5000ms - Timeout for election responses
+- **`COORDINATOR_TIMEOUT`**: 10000ms - Timeout for coordinator announcements
 
 ### Technologies Used
 - **NestJS**: TypeScript framework for scalable server applications

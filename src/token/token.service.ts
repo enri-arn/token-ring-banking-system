@@ -56,6 +56,12 @@ export class TokenService {
   private validTokenId: string | null = null;
 
   /**
+   * Flag indicating if all tokens should be rejected (during token regeneration).
+   * When true, reject ANY token until coordinator sets new validTokenId.
+   */
+  private rejectAllTokens: boolean = false;
+
+  /**
    * Creates a new TokenService instance
    */
   constructor() {}
@@ -111,6 +117,14 @@ export class TokenService {
    * }
    */
   receiveToken(token: Token): boolean {
+    // CRITICAL: If we're rejecting all tokens (during regeneration), reject immediately
+    if (this.rejectAllTokens) {
+      console.warn(
+        `[TokenService] Rejecting token ${token.id} - all tokens blocked during regeneration`,
+      );
+      return false;
+    }
+
     // If we have a valid token ID set (by coordinator), validate incoming token
     if (this.validTokenId !== null && token.id !== this.validTokenId) {
       console.warn(
@@ -320,6 +334,8 @@ export class TokenService {
    */
   setValidTokenId(tokenId: string): void {
     this.validTokenId = tokenId;
+    // Clear token rejection flag - we now accept the new valid token
+    this.rejectAllTokens = false;
     console.log(`[TokenService] Valid token ID set to: ${tokenId}`);
   }
 
@@ -336,6 +352,23 @@ export class TokenService {
    */
   clearValidTokenId(): void {
     this.validTokenId = null;
+  }
+
+  /**
+   * Enables token rejection mode (blocks ALL incoming tokens).
+   * Used during token regeneration to prevent old tokens from being accepted.
+   */
+  enableTokenRejection(): void {
+    this.rejectAllTokens = true;
+    console.log('[TokenService] Token rejection enabled - blocking all tokens');
+  }
+
+  /**
+   * Disables token rejection mode
+   */
+  disableTokenRejection(): void {
+    this.rejectAllTokens = false;
+    console.log('[TokenService] Token rejection disabled');
   }
 
   /**

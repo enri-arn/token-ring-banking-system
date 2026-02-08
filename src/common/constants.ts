@@ -57,3 +57,14 @@ export const ELECTION_TIMEOUT = 5000; // 5 seconds
  * If no COORDINATOR message is received, a new election is started.
  */
 export const COORDINATOR_TIMEOUT = 10000; // 10 seconds
+
+/**
+ * Timeout in milliseconds for token circulation monitoring.
+ * If a node doesn't see the token within this time, it assumes the token is lost
+ * and triggers an election to regenerate it (Scenario A).
+ *
+ * Calculation: With 4 nodes and TOKEN_DISPLAY_DELAY of 5 seconds,
+ * a full token rotation takes ~20 seconds. Setting timeout to 30 seconds
+ * allows for some network delays while still detecting lost tokens quickly.
+ */
+export const TOKEN_CIRCULATION_TIMEOUT = 30000; // 30 seconds
