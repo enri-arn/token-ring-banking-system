@@ -6,6 +6,29 @@ A distributed banking system implementation using the Token Ring mutual exclusio
 
 This system demonstrates distributed mutual exclusion through a Token Ring architecture, where 4 independent ATM nodes coordinate access to a shared resource (bank account) by passing a token around a logical ring.
 
+## Documentation and Demo
+
+### Video Demonstration
+**Watch the system in action**: [YouTube Demo Video](https://www.youtube.com/watch?v=w2MyXmvMnGs)
+
+The video demonstrates:
+- Normal token circulation through all 4 nodes
+- Transaction execution with mutual exclusion
+- Coordinator election using Bully Algorithm
+- Token regeneration after node failure (Scenario A)
+- Ring reconstruction without failed nodes (Scenario B)
+- Node recovery and reintegration (Scenario C)
+
+### Technical Documentation
+**Complete project documentation**: [PDF Documentation](./docs/Token-Ring-Banking-System.pdf)
+
+The PDF includes:
+- Detailed system architecture and design decisions
+- Token Ring and Bully Algorithm implementation details
+- Fault tolerance mechanisms and consensus voting
+- Complete testing scenarios and results
+- Code documentation and API reference
+
 ### Key Features
 
 - **Token Ring Algorithm**: Only the node holding the token can execute transactions
